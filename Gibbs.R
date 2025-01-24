@@ -1,159 +1,86 @@
-install.packages("MCMCpack")
-No
-library(MCMCpack)
-library(mvtnorm)
+#Gibbs Sampler
 
-#### Model setup
+#Y_i |mu ~ N(mu, sigma_sq) likelihood
+#mu~N(mu_0, sigma_sq_0) conjugate prior for mu
+#sigma_sq~IG(nu_0, beta_0) conjugate prior for sigma_sq
 
-p=2 ## order of AR process
-K=3 ## number of mixing component
-Y=matrix(y[3:200],ncol=1) ## y_{p+1:T}
-Fmtx=matrix(c(y[2:199],y[1:198]),nrow=2,byrow=TRUE) ## design matrix F
-n=length(Y) ## T-p
+#using the joint distribution (multiply the cdfs) 
+#we simplify the posteriors by removing conditional constants
+#we have our conditional posteriors ceteris paribus the other variables
+#values are then updated using the last update from the other variable and so on
 
-## prior hyperparameters
-m0=matrix(rep(0,p),ncol=1)
-C0=10*diag(p)
-n0=0.02
-d0=0.02
-a=rep(1,K)
+#Define posterior distributions for mu and sigma_sq variables
 
-#### sample functions
-
-
-sample_omega=function(L.cur){
-  n.vec=sapply(1:K, function(k){sum(L.cur==k)})
-  rdirichlet(1,a+n.vec)
+update_mu = function(n, ybar, sig2, mu_0, sig2_0) {
+  sig2_1 = 1.0 / (n / sig2 + 1.0 / sig2_0)
+  mu_1 = sig2_1 * (n * ybar / sig2 + mu_0 / sig2_0)
+  rnorm(n=1, mean=mu_1, sd=sqrt(sig2_1))
 }
 
-sample_L_one=function(beta.cur,omega.cur,nu.cur,y.cur,Fmtx.cur){
-  prob_k=function(k){
-    beta.use=beta.cur[((k-1)*p+1):(k*p)]
-    omega.cur[k]*dnorm(y.cur,mean=sum(beta.use*Fmtx.cur),sd=sqrt(nu.cur))
-  }
-  prob.vec=sapply(1:K, prob_k)
-  L.sample=sample(1:K,1,prob=prob.vec/sum(prob.vec))
-  return(L.sample)
+update_sig2 = function(n, y, mu, nu_0, beta_0) {
+  nu_1 = nu_0 + n / 2.0
+  sumsq = sum( (y - mu)^2 ) # vectorized
+  beta_1 = beta_0 + sumsq / 2.0
+  out_gamma = rgamma(n=1, shape=nu_1, rate=beta_1) # rate for gamma is shape for inv-gamma
+  1.0 / out_gamma # reciprocal of a gamma random variable is distributed inv-gamma
 }
 
-sample_L=function(y,x,beta.cur,omega.cur,nu.cur){
-  L.new=sapply(1:n, function(j){sample_L_one(beta.cur,omega.cur,nu.cur,y.cur=y[j,],Fmtx.cur=x[,j])})
-  return(L.new)
-}
-
-sample_nu=function(L.cur,beta.cur){
-  n.star=n0+n
-  err.y=function(idx){
-    L.use=L.cur[idx]
-    beta.use=beta.cur[((L.use-1)*p+1):(L.use*p)]
-    err=Y[idx,]-sum(Fmtx[,idx]*beta.use)
-    return(err^2)
-  }
-  d.star=d0+sum(sapply(1:n,err.y))
-  1/rgamma(1,shape=n.star/2,rate=d.star/2)
-}
-
-
-sample_beta=function(k,L.cur,nu.cur){
-  idx.select=(L.cur==k)
-  n.k=sum(idx.select)
-  if(n.k==0){
-    m.k=m0
-    C.k=C0
-  }else{
-    y.tilde.k=Y[idx.select,]
-    Fmtx.tilde.k=Fmtx[,idx.select]
-    e.k=y.tilde.k-t(Fmtx.tilde.k)%*%m0
-    Q.k=t(Fmtx.tilde.k)%*%C0%*%Fmtx.tilde.k+diag(n.k)
-    Q.k.inv=chol2inv(chol(Q.k))
-    A.k=C0%*%Fmtx.tilde.k%*%Q.k.inv
-    m.k=m0+A.k%*%e.k
-    C.k=C0-A.k%*%Q.k%*%t(A.k)
+#Define Gibbs sampler
+gibbs = function(y, n_iter, init, prior) {
+  ybar = mean(y)
+  n = length(y)
+  
+  ## initialize
+  mu_out = numeric(n_iter)
+  sig2_out = numeric(n_iter)
+  
+  mu_now = init$mu
+  
+  ## Gibbs sampler
+  for (i in 1:n_iter) {
+    sig2_now = update_sig2(n=n, y=y, mu=mu_now, nu_0=prior$nu_0, beta_0=prior$beta_0)
+    mu_now = update_mu(n=n, ybar=ybar, sig2=sig2_now, mu_0=prior$mu_0, sig2_0=prior$sig2_0)
+    
+    sig2_out[i] = sig2_now
+    mu_out[i] = mu_now
   }
   
-  rmvnorm(1,m.k,nu.cur*C.k)
+  cbind(mu=mu_out, sig2=sig2_out)
 }
 
-#### MCMC setup
+#Set-up problem
+#Example
+y = c(1.2, 1.4, -0.5, 0.3, 0.9, 2.3, 1.0, 0.1, 1.3, 1.9)
+ybar = mean(y)
+n = length(y)
 
-## number of iterations
-nsim=20000
+## prior
+prior = list()
+prior$mu_0 = 0.0
+prior$sig2_0 = 1.0
+prior$n_0 = 2.0 # prior effective sample size for sig2
+prior$s2_0 = 1.0 # prior point estimate for sig2
+prior$nu_0 = prior$n_0 / 2.0 # prior parameter for inverse-gamma
+prior$beta_0 = prior$n_0 * prior$s2_0 / 2.0 # prior parameter for inverse-gamma
 
-## store parameters
-
-beta.mtx=matrix(0,nrow=p*K,ncol=nsim)
-L.mtx=matrix(0,nrow=n,ncol=nsim)
-omega.mtx=matrix(0,nrow=K,ncol=nsim)
-nu.vec=rep(0,nsim)
-
-## initial value
-
-beta.cur=rep(0,p*K)
-L.cur=rep(1,n)
-omega.cur=rep(1/K,K)
-nu.cur=1
+hist(y, freq=FALSE, xlim=c(-1.0, 3.0)) # histogram of the data
+curve(dnorm(x=x, mean=prior$mu_0, sd=sqrt(prior$sig2_0)), lty=2, add=TRUE) # prior for mu
+points(y, rep(0,n), pch=1) # individual data points
+points(ybar, 0, pch=19) # sample mean
 
 
+#Run Gibbs sampler
+set.seed(53)
 
-## Gibbs Sampler
+init = list()
+init$mu = 0.0
 
-for (i in 1:nsim) {
-  set.seed(i)
-  
-  ## sample omega
-  omega.cur=sample_omega(L.cur)
-  omega.mtx[,i]=omega.cur
-  
-  ## sample L
-  L.cur=sample_L(Y,Fmtx,beta.cur,omega.cur,nu.cur)
-  L.mtx[,i]=L.cur
-  
-  ## sample nu
-  nu.cur=sample_nu(L.cur,beta.cur)
-  nu.vec[i]=nu.cur
-  
-  ## sample beta
-  beta.cur=as.vector(sapply(1:K, function(k){sample_beta(k,L.cur,nu.cur)}))
-  beta.mtx[,i]=beta.cur
-  
-  ## show the numer of iterations 
-  if(i%%1000==0){
-    print(paste("Number of iterations:",i))
-  }
-  
-}
+post = gibbs(y=y, n_iter=5e3, init=init, prior=prior)
 
-#### show the result
+#Posterior distribution analysis
+head(post)
 
-sample.select.idx=seq(10001,20000,by=1)
+library("coda")
+plot(as.mcmc(post))
 
-post.pred.y.mix=function(idx){
-  
-  k.vec.use=L.mtx[,idx]
-  beta.use=beta.mtx[,idx]
-  nu.use=nu.vec[idx]
-  
-  
-  get.mean=function(s){
-    k.use=k.vec.use[s]
-    sum(Fmtx[,s]*beta.use[((k.use-1)*p+1):(k.use*p)])
-  }
-  mu.y=sapply(1:n, get.mean)
-  sapply(1:length(mu.y), function(k){rnorm(1,mu.y[k],sqrt(nu.use))})
-  
-}  
-
-y.post.pred.sample=sapply(sample.select.idx, post.pred.y.mix)
-
-summary.vec95=function(vec){
-  c(unname(quantile(vec,0.025)),mean(vec),unname(quantile(vec,0.975)))
-}
-
-summary.y=apply(y.post.pred.sample,MARGIN=1,summary.vec95)
-
-plot(Y,type='b',xlab='Time',ylab='',pch=16,ylim=c(-1.2,1.5))
-lines(summary.y[2,],type='b',col='grey',lty=2,pch=4)
-lines(summary.y[1,],type='l',col='purple',lty=3)
-lines(summary.y[3,],type='l',col='purple',lty=3)
-legend("topright",legend=c('Truth','Mean','95% C.I.'),lty=1:3,
-       col=c('black','grey','purple'),horiz = T,pch=c(16,4,NA))
+summary(as.mcmc(post))
